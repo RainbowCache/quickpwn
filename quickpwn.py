@@ -10,8 +10,11 @@ import subprocess
 import io
 
 # Globals / Options
-subnet = "10.100.132."
+subnet = "10.100.121."
+ignore_ips = ["10.100.121.1"]
 metasploit_modules_dir = "/opt/metasploit/modules/"
+threads = 2
+ping_timeout = 0.2
 api_key = None
 host_timeout = 0
 scan_speed = 5
@@ -20,14 +23,17 @@ scan_vulns = True
 nmap_args = "-sS -n -Pn"
 debug_scan = True
 target_ports = [20, 21, 22, 23, 25, 43, 53, 80, 110, 123, 137, 138, 139, 143, 161, 162, 389, 443, 445, 500, 554, 587,
-                993, 1434, 3306, 3389, 8008, 8080, 5900]
+                993, 1433, 1434, 3306, 3389, 5432, 8000, 8008, 8080, 8443, 5900]
 ip_list_string = ""
 all_scan_results = {}
 results_dir = "results/"
 results_partial_dir = "results/partial/"
 results_full_dir = "results/full/"
+msfconsole_command = 'msfconsole -x "use {};set RHOSTS {};set RPORT {};set LHOST {};set LPORT 443;show targets"'
+payload_lhost = "10.20.30.40"
 
 # nmap -oX - 192.168.50.129 -sV -T 5 -O
+
 
 def scan_host(ip: str, do_full_scan=False):
     global host_timeout, scan_speed, api_key, os_scan, scan_vulns, nmap_args, debug_scan, target_ports, all_scan_results
@@ -38,6 +44,7 @@ def scan_host(ip: str, do_full_scan=False):
 
     full_nmap_args = nmap_args + " "
     if do_full_scan:
+        # pass
         full_nmap_args += "-p-"
     else:
         prefix = "-p"
@@ -66,8 +73,9 @@ def scan_host(ip: str, do_full_scan=False):
 
 def ping_host(ip:str):
     global ip_list_string
+    global ping_timeout
 
-    ping_result = ping3.ping(ip, timeout=1)
+    ping_result = ping3.ping(ip, timeout=ping_timeout)
     if ping_result is not None:
         ip_list_string += ip + "\n"
         scan_host(ip)
@@ -82,6 +90,7 @@ def load_results_json(json_filename:str):
 
 def search_for_cve(cve: str, ip: str, product: str, ports: list):
     global metasploit_modules_dir
+    results = ""
 
     cve_parts = cve.split('-')
     if len(cve_parts) < 3:
@@ -95,15 +104,27 @@ def search_for_cve(cve: str, ip: str, product: str, ports: list):
             continue
         searchsploit_result += line
     if len(searchsploit_result) > 0:
-        print(f"== SearchSploit Result ==\n{ip}: {product}: {cve}\nPorts: {ports}\n{searchsploit_result}")
+        results += f"== SearchSploit Result ==\n{ip}: {product}: {cve}\nPorts: {ports}\n{searchsploit_result}\n"
 
     metasploit_result = ""
     result = subprocess.run(['grep', '-F', '-r', '-i', '-l', searchsploit_cve, metasploit_modules_dir], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode == 0:
         for line in result.stdout.decode("UTF-8").splitlines(keepends=True):
-            metasploit_result += line.replace(metasploit_modules_dir, "").replace(".rb\n", "") + "\n"
+            metasploit_lines = []
+            metasploit_line = line.replace(metasploit_modules_dir, "").replace(".rb\n", "")
+            metasploit_result += metasploit_line + "\n"
+            metasploit_lines.append(metasploit_line)
+
+            command = ""
+            for port in ports:
+                for metasploit_line in metasploit_lines:
+                    command += msfconsole_command.format(metasploit_line, ip, port, payload_lhost) + "\n"
+            metasploit_result += command
+
         if len(metasploit_result) > 0:
-            print(f"== Metasploit Result ==\n{ip}: {product}: {cve}\nPorts: {ports}\n{metasploit_result}")
+            results += f"== Metasploit Result ==\n{ip}: {product}: {cve}\nPorts: {ports}\n{metasploit_result}\n"
+
+    return results
 
 
 def get_ports_from_product(scan_result: dict, ip: str, product: str):
@@ -121,13 +142,17 @@ def get_ports_from_product(scan_result: dict, ip: str, product: str):
 
 
 def parse_scan_results(scan_result):
+    report = ""
     for ip in scan_result:
         for product in scan_result[ip]['vulns']:
             for cve in scan_result[ip]['vulns'][product]:
                 ports = get_ports_from_product(scan_result, ip, product)
-                search_for_cve(cve, ip, product, ports)
+                result = search_for_cve(cve, ip, product, ports)
+                if len(result) > 0:
+                    print(result)
+                    report += result + "\n"
 
-    exit(0)
+    return report
 
 
 def wait_for_thread_list_to_end(threadlist: list):
@@ -138,16 +163,27 @@ def wait_for_thread_list_to_end(threadlist: list):
                 threadlist.remove(thread)
 
 
+def wait_for_open_thread(threadlist: list):
+    global threads
+    while len(threadlist) >= threads:
+        time.sleep(0.1)
+        for thread in threadlist:
+            if not thread.is_alive():
+                threadlist.remove(thread)
+
+
 def main():
     global api_key
     global subnet
     global ip_list_string
     global all_scan_results
+    global ignore_ips
     scan_thread_list = []
     ping_thread_list = []
 
-    results = load_results_json("results/partial_results.json")
-    parse_scan_results(results)
+    # Example of how to parse jsons.
+    # results = load_results_json("results/partial_results.json")
+    # parse_scan_results(results)
 
     try:
         with open("api.txt", "r") as api_file:
@@ -158,19 +194,32 @@ def main():
     if os.path.isfile("IPS_FIRING_RANGE.TXT"):
         with open("IPS_FIRING_RANGE.TXT", "r") as ips:
             for ip in ips:
+                wait_for_open_thread(scan_thread_list)
                 ip = ip.strip()
                 new_thread = threading.Thread(target=scan_host, args=[ip, True])
                 new_thread.start()
                 scan_thread_list.append(new_thread)
+
 
         wait_for_thread_list_to_end(scan_thread_list)
 
         with open(results_dir + "full_results.json", "w") as outfile:
             json.dump(all_scan_results, outfile, indent=2)
 
+        full_report = parse_scan_results(all_scan_results)
+        with open(results_dir + "full_report.txt", "w") as outfile:
+            outfile.write(full_report)
+
     else:
         for i in range(0, 256):
+            wait_for_open_thread(ping_thread_list)
             ip = subnet + str(i)
+            skip = False
+            for ignore_ip in ignore_ips:
+                if ip == ignore_ip:
+                    skip = True
+            if skip:
+                continue
             new_thread = threading.Thread(target=ping_host, args=[ip])
             new_thread.start()
             ping_thread_list.append(new_thread)
@@ -183,6 +232,9 @@ def main():
         with open(results_dir + "partial_results.json", "w") as outfile:
             json.dump(all_scan_results, outfile, indent=2)
 
+        partial_report = parse_scan_results(all_scan_results)
+        with open(results_dir + "partial_report.txt", "w") as outfile:
+            outfile.write(partial_report)
 
 if __name__ == "__main__":
     main()
