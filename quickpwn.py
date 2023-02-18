@@ -11,7 +11,7 @@ import io
 
 # Globals / Options
 subnet = "10.100.132."
-metasploit_exploit_dir = "/opt/metasploit/modules/exploits/"
+metasploit_modules_dir = "/opt/metasploit/modules/"
 api_key = None
 host_timeout = 0
 scan_speed = 5
@@ -80,8 +80,8 @@ def load_results_json(json_filename:str):
     return data
 
 
-def search_for_cve(cve: str):
-    global metasploit_exploit_dir
+def search_for_cve(cve: str, ip: str, product: str, ports: list):
+    global metasploit_modules_dir
 
     cve_parts = cve.split('-')
     if len(cve_parts) < 3:
@@ -95,23 +95,37 @@ def search_for_cve(cve: str):
             continue
         searchsploit_result += line
     if len(searchsploit_result) > 0:
-        print(searchsploit_result)
+        print(f"== SearchSploit Result ==\n{ip}: {product}: {cve}\nPorts: {ports}\n{searchsploit_result}")
+
+    metasploit_result = ""
+    result = subprocess.run(['grep', '-F', '-r', '-i', '-l', searchsploit_cve, metasploit_modules_dir], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode == 0:
+        for line in result.stdout.decode("UTF-8").splitlines(keepends=True):
+            metasploit_result += line.replace(metasploit_modules_dir, "").replace(".rb\n", "") + "\n"
+        if len(metasploit_result) > 0:
+            print(f"== Metasploit Result ==\n{ip}: {product}: {cve}\nPorts: {ports}\n{metasploit_result}")
+
+
+def get_ports_from_product(scan_result: dict, ip: str, product: str):
+    ports = []
+    for ip_result in scan_result:
+        if ip.upper().find(ip_result) < 0:
+            continue
+        for port in scan_result[ip]['ports']:
+            scan_product: str = ""
+            scan_product += scan_result[ip]['ports'][port]["product"]
+            if scan_product.upper().find(product.upper()) >= 0:
+                ports.append(int(port))
+
+    return ports
 
 
 def parse_scan_results(scan_result):
     for ip in scan_result:
-        print(ip)
-        # print(scan_result[ip]["os"]["os_name"])
-        # print("Ports: ")
-        for port in scan_result[ip]['ports']:
-            # print(port + ": " + scan_result[ip]['ports'][port]["product"])
-            for port_info in scan_result[ip]['ports'][port]:
-                pass
-                # print(port_info + " " + scan_result[ip]['ports'][port][port_info])
-
         for product in scan_result[ip]['vulns']:
             for cve in scan_result[ip]['vulns'][product]:
-                search_for_cve(cve)
+                ports = get_ports_from_product(scan_result, ip, product)
+                search_for_cve(cve, ip, product, ports)
 
     exit(0)
 
