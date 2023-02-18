@@ -6,10 +6,12 @@ import threading
 import time
 import json
 import ping3
+import subprocess
 import io
 
 # Globals / Options
 subnet = "10.100.132."
+metasploit_exploit_dir = "/opt/metasploit/modules/exploits/"
 api_key = None
 host_timeout = 0
 scan_speed = 5
@@ -24,7 +26,6 @@ all_scan_results = {}
 results_dir = "results/"
 results_partial_dir = "results/partial/"
 results_full_dir = "results/full/"
-
 
 # nmap -oX - 192.168.50.129 -sV -T 5 -O
 
@@ -79,16 +80,38 @@ def load_results_json(json_filename:str):
     return data
 
 
+def search_for_cve(cve: str):
+    global metasploit_exploit_dir
+
+    cve_parts = cve.split('-')
+    if len(cve_parts) < 3:
+        return
+
+    searchsploit_cve = cve_parts[1] + "-" + cve_parts[2]
+    result = subprocess.run(['searchsploit', '--cve', searchsploit_cve], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    searchsploit_result = ""
+    for line in result.stdout.decode("UTF-8").splitlines(keepends=True):
+        if line.find(": No Results\n") >= 0:
+            continue
+        searchsploit_result += line
+    if len(searchsploit_result) > 0:
+        print(searchsploit_result)
+
+
 def parse_scan_results(scan_result):
     for ip in scan_result:
         print(ip)
-        print(scan_result[ip]["os"]["os_name"])
-        print("Ports: ")
+        # print(scan_result[ip]["os"]["os_name"])
+        # print("Ports: ")
         for port in scan_result[ip]['ports']:
-            print(port + ": " + scan_result[ip]['ports'][port]["product"])
+            # print(port + ": " + scan_result[ip]['ports'][port]["product"])
             for port_info in scan_result[ip]['ports'][port]:
                 pass
                 # print(port_info + " " + scan_result[ip]['ports'][port][port_info])
+
+        for product in scan_result[ip]['vulns']:
+            for cve in scan_result[ip]['vulns'][product]:
+                search_for_cve(cve)
 
     exit(0)
 
@@ -109,8 +132,8 @@ def main():
     scan_thread_list = []
     ping_thread_list = []
 
-    # result = load_results_json("192.168.50.129_results.json")
-    # parse_scan_results(result)
+    results = load_results_json("results/partial_results.json")
+    parse_scan_results(results)
 
     try:
         with open("api.txt", "r") as api_file:
