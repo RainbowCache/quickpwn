@@ -10,14 +10,14 @@ import subprocess
 import io
 
 # Globals / Options
-subnet = "10.100.121."
-ignore_ips = ["10.100.121.1"]
-metasploit_modules_dir = "/opt/metasploit/modules/"
+subnet = "172.16.70."
+ignore_ips = ["172.16.70.1"]
+metasploit_modules_dir = "/usr/share/metasploit-framework/modules/" # "/opt/metasploit/modules/"
 threads = 2
-ping_timeout = 0.2
+ping_timeout = 1
 api_key = None
 host_timeout = 0
-scan_speed = 5
+scan_speed = 3
 os_scan = True
 scan_vulns = True
 nmap_args = "-sS -n -Pn"
@@ -26,6 +26,7 @@ target_ports = [20, 21, 22, 23, 25, 43, 53, 80, 110, 123, 137, 138, 139, 143, 16
                 993, 1433, 1434, 3306, 3389, 5432, 8000, 8008, 8080, 8443, 5900]
 ip_list_string = ""
 all_scan_results = {}
+all_scan_reports = []
 results_dir = "results/"
 results_partial_dir = "results/partial/"
 results_full_dir = "results/full/"
@@ -37,15 +38,15 @@ payload_lhost = "10.20.30.40"
 
 def scan_host(ip: str, do_full_scan=False):
     global host_timeout, scan_speed, api_key, os_scan, scan_vulns, nmap_args, debug_scan, target_ports, all_scan_results
-    global results_partial_dir, results_full_dir
+    global results_partial_dir, results_full_dir, all_scan_reports
 
     print("Starting scan.")
     scanner = AutoScanner()
 
     full_nmap_args = nmap_args + " "
     if do_full_scan:
-        # pass
-        full_nmap_args += "-p-"
+        pass
+        # full_nmap_args += "-p-"
     else:
         prefix = "-p"
         for port in target_ports:
@@ -63,6 +64,10 @@ def scan_host(ip: str, do_full_scan=False):
 
         for ip in results:
             all_scan_results[ip] = results[ip]
+
+        exploit_report = parse_scan_results(results)
+        all_scan_reports.append(exploit_report)
+        print(exploit_report)
     except Exception as e:
         print(e)
         print(e.args)
@@ -172,6 +177,15 @@ def wait_for_open_thread(threadlist: list):
                 threadlist.remove(thread)
 
 
+def assemble_final_report():
+    global all_scan_reports
+
+    final_report = ""
+    for report in all_scan_reports:
+        final_report += report
+
+    return final_report
+
 def main():
     global api_key
     global subnet
@@ -189,7 +203,7 @@ def main():
         with open("api.txt", "r") as api_file:
             api_key = api_file.readline().strip()
     except:
-        print("Unable to load api key.")
+        print("Unable to load api key. Put api key in api.txt.")
 
     if os.path.isfile("IPS_FIRING_RANGE.TXT"):
         with open("IPS_FIRING_RANGE.TXT", "r") as ips:
@@ -206,9 +220,8 @@ def main():
         with open(results_dir + "full_results.json", "w") as outfile:
             json.dump(all_scan_results, outfile, indent=2)
 
-        full_report = parse_scan_results(all_scan_results)
         with open(results_dir + "full_report.txt", "w") as outfile:
-            outfile.write(full_report)
+            outfile.write(assemble_final_report())
 
     else:
         for i in range(0, 256):
@@ -232,9 +245,9 @@ def main():
         with open(results_dir + "partial_results.json", "w") as outfile:
             json.dump(all_scan_results, outfile, indent=2)
 
-        partial_report = parse_scan_results(all_scan_results)
         with open(results_dir + "partial_report.txt", "w") as outfile:
-            outfile.write(partial_report)
+            outfile.write(assemble_final_report())
+
 
 if __name__ == "__main__":
     main()
