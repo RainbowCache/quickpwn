@@ -9,6 +9,15 @@ import ping3
 import subprocess
 import io
 
+# TODO: Ping scan separate from autopwn scan.
+# TODO: Integrate with pymetasploit3
+# TODO: Run some hail mary attacks.
+# TODO: Also run vulners nmap script sudo nmap -sS -sV --script vulners 10.0.2.50
+# TODO: For web services, look for a few select pages like phpmyadmin, passwords, passwords.txt, etc..
+# TODO: For FTP endpoints, check for anonymous login
+# TODO: If it sees 445, run eternal blue MS17-01, etc...
+# TODO: Allow multiple subnets to be specified to be scanned.
+
 # Globals / Options
 subnet = "172.16.70."
 ignore_ips = ["172.16.70.1"]
@@ -185,6 +194,7 @@ def assemble_final_report():
         final_report += report
 
     return final_report
+
 
 def main():
     global api_key
