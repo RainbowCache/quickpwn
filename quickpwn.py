@@ -7,42 +7,53 @@ import time
 import json
 import ping3
 import subprocess
-import io
+import ipaddress
 
-# TODO: Ping scan separate from autopwn scan.
 # TODO: Integrate with pymetasploit3
 # TODO: Run some hail mary attacks.
 # TODO: Also run vulners nmap script sudo nmap -sS -sV --script vulners 10.0.2.50
 # TODO: For web services, look for a few select pages like phpmyadmin, passwords, passwords.txt, etc..
 # TODO: For FTP endpoints, check for anonymous login
 # TODO: If it sees 445, run eternal blue MS17-01, etc...
-# TODO: Allow multiple subnets to be specified to be scanned.
 
-# Globals / Options
-subnet = "172.16.70."
-ignore_ips = ["172.16.70.1"]
-metasploit_modules_dir = "/usr/share/metasploit-framework/modules/" # "/opt/metasploit/modules/"
-threads = 2
-ping_timeout = 1
-api_key = None
-host_timeout = 0
-scan_speed = 3
-os_scan = True
-scan_vulns = True
-nmap_args = "-sS -n -Pn"
+# Options
+subnets = ["10.0.0.0/24"] # Specify CIDR subnets here.
+ignore_ips = ["172.16.70.1"] # Specify IPs to ignore here.
+metasploit_modules_dir = "/usr/share/metasploit-framework/modules/" # Set the metasploit modules directory.
+if not os.path.isdir(metasploit_modules_dir):
+    metasploit_modules_dir = "/opt/metasploit/modules/"
+max_ping_threads = 10 # Max number of ping threads.
+max_scanning_threads = 2 # Maximum number of nmap scanning threads.
+ping_timeout = 1 # Timeout of pings in seconds.
+api_key = None # API key for NIST database. Can be specified here or in api.txt.
+host_timeout = 0 # Scanner host timeout.
+scan_speed = 3 # Nmap scan speed.
+os_scan = True # ID OS in nmap scan.
+scan_vulns = True # Also scan for vulnerabilities.
+nmap_args = "-sS -n -Pn" # Default extra nmap args. TCP/SYN, no DNS lookup, no ping.
 debug_scan = True
 target_ports = [20, 21, 22, 23, 25, 43, 53, 80, 110, 123, 137, 138, 139, 143, 161, 162, 389, 443, 445, 500, 554, 587,
-                993, 1433, 1434, 3306, 3389, 5432, 8000, 8008, 8080, 8443, 5900]
-ip_list_string = ""
-all_scan_results = {}
-all_scan_reports = []
+                993, 1433, 1434, 3306, 3389, 5432, 8000, 8008, 8080, 8443, 5900] # Default ports for first scan.
+
+# Input/Output location.
 results_dir = "results/"
 results_partial_dir = "results/partial/"
 results_full_dir = "results/full/"
+nist_api_key_filename = "api.txt"
+ip_list_filename = "ip_list.txt"
+
+# Metasploit options.
 msfconsole_command = 'msfconsole -x "use {};set RHOSTS {};set RPORT {};set LHOST {};set LPORT 443;show targets"'
 payload_lhost = "10.20.30.40"
 
-# nmap -oX - 192.168.50.129 -sV -T 5 -O
+# Global varibales.
+ip_list_string = ""
+scan_queue = []
+do_continue_processing_scan_queue = True
+scan_thread_list = []
+ping_thread_list = []
+all_scan_results = {}
+all_scan_reports = []
 
 
 def scan_host(ip: str, do_full_scan=False):
@@ -54,8 +65,8 @@ def scan_host(ip: str, do_full_scan=False):
 
     full_nmap_args = nmap_args + " "
     if do_full_scan:
-        pass
-        # full_nmap_args += "-p-"
+        # pass
+        full_nmap_args += "-p-"
     else:
         prefix = "-p"
         for port in target_ports:
@@ -89,10 +100,15 @@ def ping_host(ip:str):
     global ip_list_string
     global ping_timeout
 
+    print(f"Pinging IP: {ip}")
     ping_result = ping3.ping(ip, timeout=ping_timeout)
-    if ping_result is not None:
+    if ping_result is not None and type(ping_result) is not bool:
+        print(type(ping_result))
+        print(ping_result)
+        print(f"Ping reply from: {ip}")
         ip_list_string += ip + "\n"
-        scan_host(ip)
+        wait_for_open_thread(scan_thread_list, max_scanning_threads)
+        add_scan_to_queue(ip, False)
 
 
 def load_results_json(json_filename:str):
@@ -177,13 +193,52 @@ def wait_for_thread_list_to_end(threadlist: list):
                 threadlist.remove(thread)
 
 
-def wait_for_open_thread(threadlist: list):
-    global threads
-    while len(threadlist) >= threads:
+def wait_for_open_thread(threadlist: list, max_threads: int):
+    while len(threadlist) >= max_threads:
         time.sleep(0.1)
         for thread in threadlist:
             if not thread.is_alive():
                 threadlist.remove(thread)
+
+
+def create_scanning_thread(ip: str, full_scan: bool):
+    global scan_thread_list
+    ip = ip.strip()
+    new_thread = threading.Thread(target=scan_host, args=[ip, full_scan])
+    new_thread.start()
+    scan_thread_list.append(new_thread)
+
+
+def create_ping_thread(ip: str):
+    global ping_thread_list
+    global ignore_ips
+    ip = ip.strip()
+
+    for ignore_ip in ignore_ips:
+        if ip == ignore_ip:
+            return
+
+    new_thread = threading.Thread(target=ping_host, args=[ip])
+    new_thread.start()
+    ping_thread_list.append(new_thread)
+
+
+def add_scan_to_queue(ip: str, do_full_scan: bool):
+    global scan_queue
+
+    scan_queue.append((ip.strip(), do_full_scan))
+
+
+def process_scan_queue():
+    global scan_queue
+    global do_continue_processing_scan_queue
+
+    while len(scan_queue) > 0 or do_continue_processing_scan_queue:
+        time.sleep(0.1)
+        for scan in scan_queue:
+            wait_for_open_thread(scan_thread_list, max_scanning_threads)
+            create_scanning_thread(scan[0], scan[1])
+            scan_queue.remove(scan)
 
 
 def assemble_final_report():
@@ -198,33 +253,38 @@ def assemble_final_report():
 
 def main():
     global api_key
-    global subnet
+    global subnets
     global ip_list_string
     global all_scan_results
     global ignore_ips
-    scan_thread_list = []
-    ping_thread_list = []
+    global max_ping_threads
+    global max_scan_threads
+    global nist_api_key_filename
+    global ip_list_filename
+    global do_continue_processing_scan_queue
 
     # Example of how to parse jsons.
     # results = load_results_json("results/partial_results.json")
     # parse_scan_results(results)
 
+    print("Creating scan thread.")
+    process_scan_queue_thread = threading.Thread(target=process_scan_queue)
+    process_scan_queue_thread.start()
+
     try:
-        with open("api.txt", "r") as api_file:
+        with open(nist_api_key_filename, "r") as api_file:
             api_key = api_file.readline().strip()
     except:
         print("Unable to load api key. Put api key in api.txt.")
 
-    if os.path.isfile("IPS_FIRING_RANGE.TXT"):
-        with open("IPS_FIRING_RANGE.TXT", "r") as ips:
+    if os.path.isfile(ip_list_filename):
+        with open(ip_list_filename, "r") as ips:
             for ip in ips:
-                wait_for_open_thread(scan_thread_list)
-                ip = ip.strip()
-                new_thread = threading.Thread(target=scan_host, args=[ip, True])
-                new_thread.start()
-                scan_thread_list.append(new_thread)
+                add_scan_to_queue(ip, True)
 
-
+        do_continue_processing_scan_queue = False
+        while process_scan_queue_thread.is_alive():
+            time.sleep(0.1)
         wait_for_thread_list_to_end(scan_thread_list)
 
         with open(results_dir + "full_results.json", "w") as outfile:
@@ -234,22 +294,18 @@ def main():
             outfile.write(assemble_final_report())
 
     else:
-        for i in range(0, 256):
-            wait_for_open_thread(ping_thread_list)
-            ip = subnet + str(i)
-            skip = False
-            for ignore_ip in ignore_ips:
-                if ip == ignore_ip:
-                    skip = True
-            if skip:
-                continue
-            new_thread = threading.Thread(target=ping_host, args=[ip])
-            new_thread.start()
-            ping_thread_list.append(new_thread)
+        for subnet in subnets:
+            for ip in ipaddress.IPv4Network(subnet):
+                wait_for_open_thread(ping_thread_list, max_ping_threads)
+                create_ping_thread(str(ip))
 
+        do_continue_processing_scan_queue = False
+        while process_scan_queue_thread.is_alive():
+            time.sleep(0.1)
         wait_for_thread_list_to_end(ping_thread_list)
+        wait_for_thread_list_to_end(scan_thread_list)
 
-        with open("IPS_FIRING_RANGE.TXT", "w") as outfile:
+        with open(ip_list_filename, "w") as outfile:
             outfile.write(ip_list_string)
 
         with open(results_dir + "partial_results.json", "w") as outfile:
