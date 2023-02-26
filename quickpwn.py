@@ -66,6 +66,7 @@ all_scan_reports = []
 # SCANNING / PINGING / CVE-FINDING / REPORT CREATION FUNCTIONS
 # ======================================================================================================================
 
+
 def scan_host(ip: str, do_full_scan=False):
     global host_timeout, scan_speed, api_key, os_scan, scan_vulns, nmap_args, debug_scan, target_ports, all_scan_results
     global results_partial_dir, results_full_dir, all_scan_reports
@@ -300,10 +301,7 @@ def start_metasploit_tmux():
             return
 
     if os.fork() == 0:
-        print("Forkin")
-        # os.execl("/bin/sh", "/bin/sh", "-c", f"{tmux_filepath} new-session -d -s {tmux_session} -n {tmux_msf_window} 'msfconsole' &")
         os.execl(tmux_filepath, tmux_filepath, "new-session", "-d", "-s", tmux_session, "-n", tmux_msf_window, 'msfconsole')
-        print("Created! Bye!")
         exit(0)
 
 
