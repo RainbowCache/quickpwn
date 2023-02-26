@@ -8,6 +8,7 @@ import json
 import ping3
 import subprocess
 import ipaddress
+import pymetasploit3
 
 # TODO: Integrate with pymetasploit3
 # TODO: Run some hail mary attacks.
@@ -15,9 +16,10 @@ import ipaddress
 # TODO: For web services, look for a few select pages like phpmyadmin, passwords, passwords.txt, etc..
 # TODO: For FTP endpoints, check for anonymous login
 # TODO: If it sees 445, run eternal blue MS17-01, etc...
+# TODO: Searchsploit output and parsing in json.
 
 # Options
-subnets = ["10.0.0.0/24"] # Specify CIDR subnets here.
+subnets = ["10.0.0.0/24", "10.0.2.0/24"] # Specify CIDR subnets here.
 ignore_ips = ["172.16.70.1"] # Specify IPs to ignore here.
 metasploit_modules_dir = "/usr/share/metasploit-framework/modules/" # Set the metasploit modules directory.
 if not os.path.isdir(metasploit_modules_dir):
@@ -27,13 +29,13 @@ max_scanning_threads = 2 # Maximum number of nmap scanning threads.
 ping_timeout = 1 # Timeout of pings in seconds.
 api_key = None # API key for NIST database. Can be specified here or in api.txt.
 host_timeout = 0 # Scanner host timeout.
-scan_speed = 3 # Nmap scan speed.
+scan_speed = 5 # Nmap scan speed.
 os_scan = True # ID OS in nmap scan.
 scan_vulns = True # Also scan for vulnerabilities.
-nmap_args = "-sS -n -Pn" # Default extra nmap args. TCP/SYN, no DNS lookup, no ping.
 debug_scan = True
 target_ports = [20, 21, 22, 23, 25, 43, 53, 80, 110, 123, 137, 138, 139, 143, 161, 162, 389, 443, 445, 500, 554, 587,
                 993, 1433, 1434, 3306, 3389, 5432, 8000, 8008, 8080, 8443, 5900] # Default ports for first scan.
+nmap_args = f"-sS -n -Pn --max-scan-delay 0" # Default extra nmap args. No DNS lookup, no ping. Don't increase scan delay.
 
 # Input/Output location.
 results_dir = "results/"
@@ -46,6 +48,11 @@ ip_list_filename = "ip_list.txt"
 msfconsole_command = 'msfconsole -x "use {};set RHOSTS {};set RPORT {};set LHOST {};set LPORT 443;show targets"'
 payload_lhost = "10.20.30.40"
 
+# Metasploit Options
+tmux_session = "qpwn-msfconsole" # The session name of the msfconsole.
+tmux_msf_window = "msfconsole" # The window for msfconsole.
+tmux_filepath = "/usr/bin/tmux"
+
 # Global varibales.
 ip_list_string = ""
 scan_queue = []
@@ -55,43 +62,69 @@ ping_thread_list = []
 all_scan_results = {}
 all_scan_reports = []
 
+# ======================================================================================================================
+# SCANNING / PINGING / CVE-FINDING / REPORT CREATION FUNCTIONS
+# ======================================================================================================================
 
 def scan_host(ip: str, do_full_scan=False):
     global host_timeout, scan_speed, api_key, os_scan, scan_vulns, nmap_args, debug_scan, target_ports, all_scan_results
     global results_partial_dir, results_full_dir, all_scan_reports
+    retry_count = 3 # Retry 3 times.
+    results = {}
 
     print("Starting scan.")
     scanner = AutoScanner()
 
     full_nmap_args = nmap_args + " "
     if do_full_scan:
-        # pass
-        full_nmap_args += "-p-"
+        pass
+        # full_nmap_args += "-p-"
     else:
         prefix = "-p"
         for port in target_ports:
             full_nmap_args += prefix + str(port)
             prefix = ","
 
-    try:
-        results = scanner.scan(ip, host_timeout=host_timeout, scan_speed=scan_speed, apiKey=api_key,
-                               os_scan=os_scan, scan_vulns=scan_vulns, nmap_args=full_nmap_args, debug=debug_scan)
+    while retry_count > 0:
+        try:
+            results = scanner.scan(ip, host_timeout=host_timeout, scan_speed=scan_speed, apiKey=api_key,
+                                   os_scan=os_scan, scan_vulns=scan_vulns, nmap_args=full_nmap_args, debug=debug_scan)
 
-        if do_full_scan:
-            scanner.save_to_file(results_full_dir + ip + "_full_results.json")
-        else:
-            scanner.save_to_file(results_partial_dir + ip + "_partial_results.json")
+            if do_full_scan:
+                if len(ip) == 1:
+                    scanner.save_to_file(results_full_dir + ip[0] + "_full_results.json")
+            else:
+                if len(ip) == 1:
+                    scanner.save_to_file(results_partial_dir + ip[0] + "_partial_results.json")
 
-        for ip in results:
-            all_scan_results[ip] = results[ip]
+            for ip in results:
+                all_scan_results[ip] = results[ip]
 
-        exploit_report = parse_scan_results(results)
-        all_scan_reports.append(exploit_report)
-        print(exploit_report)
-    except Exception as e:
-        print(e)
-        print(e.args)
-        print("Host scan failed. Are you running as root?")
+            retry_count = 0
+        except Exception as e:
+            print(f"Host scan failed. Are you running as root?: {e} {e.args}")
+            retry_count -= 1
+            if retry_count > 0:
+                print("Retrying...")
+                time.sleep(0.1)
+            else:
+                print("Not retrying...")
+
+    retry_count = 3
+    while retry_count > 0:
+        try:
+            exploit_report = parse_scan_results(results)
+            all_scan_reports.append(exploit_report)
+            print(exploit_report)
+            retry_count = 0
+        except Exception as e:
+            print(f"Unable to generated report: {e} {e.args}")
+            retry_count -= 1
+            if retry_count > 0:
+                print("Retrying...")
+                time.sleep(0.1)
+            else:
+                print("Not retrying...")
 
     print("Scan complete.")
 
@@ -100,12 +133,10 @@ def ping_host(ip:str):
     global ip_list_string
     global ping_timeout
 
-    print(f"Pinging IP: {ip}")
+    ip = ip.strip()
     ping_result = ping3.ping(ip, timeout=ping_timeout)
     if ping_result is not None and type(ping_result) is not bool:
-        print(type(ping_result))
-        print(ping_result)
-        print(f"Ping reply from: {ip}")
+        print(f"Ping reply from {ip}")
         ip_list_string += ip + "\n"
         wait_for_open_thread(scan_thread_list, max_scanning_threads)
         add_scan_to_queue(ip, False)
@@ -127,14 +158,15 @@ def search_for_cve(cve: str, ip: str, product: str, ports: list):
         return
 
     searchsploit_cve = cve_parts[1] + "-" + cve_parts[2]
-    result = subprocess.run(['searchsploit', '--cve', searchsploit_cve], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    searchsploit_result = ""
-    for line in result.stdout.decode("UTF-8").splitlines(keepends=True):
-        if line.find(": No Results\n") >= 0:
-            continue
-        searchsploit_result += line
-    if len(searchsploit_result) > 0:
-        results += f"== SearchSploit Result ==\n{ip}: {product}: {cve}\nPorts: {ports}\n{searchsploit_result}\n"
+    result = subprocess.run(['searchsploit', '-j', '-o', '--cve', searchsploit_cve], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        searchsploit_result = json.loads(result.stdout)['RESULTS_EXPLOIT']
+        if len(searchsploit_result) > 0:
+            results += f"== SearchSploit Result ==\n{ip}: {product}: {cve}\nPorts: {ports}\n"
+            for e in searchsploit_result:
+                results += f"Title: {e['Title']}\nDate Published:{e['Date_Published']}\nPath: {e['Path']}\n\n"
+    except Exception as e:
+        print(f"Error with searchsploit search: {e}")
 
     metasploit_result = ""
     result = subprocess.run(['grep', '-F', '-r', '-i', '-l', searchsploit_cve, metasploit_modules_dir], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -251,6 +283,38 @@ def assemble_final_report():
     return final_report
 
 
+# ======================================================================================================================
+# METASPLOIT INTEGRATION
+# ======================================================================================================================
+
+
+def start_metasploit_tmux():
+    global tmux_session
+    global tmux_msf_window
+    global tmux_filepath
+
+    result = subprocess.run(['tmux', 'ls'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    for line in result.stdout.decode("UTF-8").splitlines():
+        if line.find(f"{tmux_session}:") == 0:
+            print("Metasploit tmux session already exists.")
+            return
+
+    if os.fork() == 0:
+        print("Forkin")
+        # os.execl("/bin/sh", "/bin/sh", "-c", f"{tmux_filepath} new-session -d -s {tmux_session} -n {tmux_msf_window} 'msfconsole' &")
+        os.execl(tmux_filepath, tmux_filepath, "new-session", "-d", "-s", tmux_session, "-n", tmux_msf_window, 'msfconsole')
+        print("Created! Bye!")
+        exit(0)
+
+
+def metasploit_test():
+    start_metasploit_tmux()
+
+# ======================================================================================================================
+# MAIN FUNCTION
+# ======================================================================================================================
+
+
 def main():
     global api_key
     global subnets
@@ -271,16 +335,17 @@ def main():
     process_scan_queue_thread = threading.Thread(target=process_scan_queue)
     process_scan_queue_thread.start()
 
-    try:
-        with open(nist_api_key_filename, "r") as api_file:
-            api_key = api_file.readline().strip()
-    except:
-        print("Unable to load api key. Put api key in api.txt.")
+    if api_key is None:
+        try:
+            with open(nist_api_key_filename, "r") as api_file:
+                api_key = api_file.readline().strip()
+        except:
+            print("Unable to load api key. Put api key in api.txt.")
 
     if os.path.isfile(ip_list_filename):
         with open(ip_list_filename, "r") as ips:
             for ip in ips:
-                add_scan_to_queue(ip, True)
+                add_scan_to_queue(ip.strip(), True)
 
         do_continue_processing_scan_queue = False
         while process_scan_queue_thread.is_alive():
@@ -316,4 +381,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    metasploit_test()
