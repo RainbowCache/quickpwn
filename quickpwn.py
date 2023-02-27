@@ -8,7 +8,7 @@ import json
 import ping3
 import subprocess
 import ipaddress
-import pymetasploit3
+import pymetasploit3.msfrpc as msfrpc
 
 # TODO: Integrate with pymetasploit3
 # TODO: Run some hail mary attacks.
@@ -17,6 +17,7 @@ import pymetasploit3
 # TODO: For FTP endpoints, check for anonymous login
 # TODO: If it sees 445, run eternal blue MS17-01, etc...
 # TODO: Searchsploit output and parsing in json.
+# TODO: Make sure metasploit and tmux are installed before running.
 
 # Options
 subnets = ["10.0.0.0/24", "10.0.2.0/24"] # Specify CIDR subnets here.
@@ -48,10 +49,16 @@ ip_list_filename = "ip_list.txt"
 msfconsole_command = 'msfconsole -x "use {};set RHOSTS {};set RPORT {};set LHOST {};set LPORT 443;show targets"'
 payload_lhost = "10.20.30.40"
 
-# Metasploit Options
-tmux_session = "qpwn-msfconsole" # The session name of the msfconsole.
-tmux_msf_window = "msfconsole" # The window for msfconsole.
-tmux_filepath = "/usr/bin/tmux"
+# Metasploit Control Options
+msf_client: msfrpc.MsfRpcClient = None
+tmux_session: str = "qpwn-msfconsole" # The session name of the msfconsole.
+tmux_msf_window: str = "msfconsole" # The window for msfconsole.
+tmux_filepath: str = "/usr/bin/tmux" # The file location of tmux.
+msf_host: str = "127.0.0.1" # Metasploit RPC listens here.
+msf_port: int = 55552 # Metasploit RPC port
+msf_do_ssl: bool = False # Turn on or off SSL for RPC control.
+msf_username: str = "msf" # Metasploit username for RPC control
+msf_password: str = "msf_pass" # Super secret metasploit password for RPC control.
 
 # Global varibales.
 ip_list_string = ""
@@ -290,23 +297,46 @@ def assemble_final_report():
 
 
 def start_metasploit_tmux():
-    global tmux_session
-    global tmux_msf_window
-    global tmux_filepath
+    global tmux_session, tmux_msf_window, tmux_filepath, msf_password, msf_client, msf_username, msf_host, msf_port, msf_do_ssl
+    start_rpc_cmd = f"load msgrpc Pass='{msf_password}' User='{msf_username}' SSL={str(msf_do_ssl).lower()} ServerHost={msf_host} ServerPort={msf_port}"
+    do_start_tmux = True
 
-    result = subprocess.run(['tmux', 'ls'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run([tmux_filepath, 'ls'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     for line in result.stdout.decode("UTF-8").splitlines():
         if line.find(f"{tmux_session}:") == 0:
             print("Metasploit tmux session already exists.")
-            return
+            send_keys_to_msfconsole(start_rpc_cmd)
+            do_start_tmux = False
 
-    if os.fork() == 0:
-        os.execl(tmux_filepath, tmux_filepath, "new-session", "-d", "-s", tmux_session, "-n", tmux_msf_window, 'msfconsole')
+    if do_start_tmux and os.fork() == 0:
+        os.execl(tmux_filepath, tmux_filepath, "new-session", "-d", "-s", tmux_session, "-n", tmux_msf_window, f'msfconsole -x "{start_rpc_cmd}"')
         exit(0)
+
+    max_retries = 10
+    while msf_client is None and max_retries > 0:
+        try:
+            print("Connecting to MSF RPC...")
+            msf_client = msfrpc.MsfRpcClient(password=msf_password, username=msf_username, port=msf_port, ssl=msf_do_ssl, server=msf_host)
+        except:
+            max_retries -= 1
+            msf_client = None
+
+    if msf_client is None:
+        raise Exception("Unable to connect to msf rpc.")
+
+    print("Done!")
+
+
+def send_keys_to_msfconsole(keys: str, do_press_enter: bool = True):
+    global tmux_session, tmux_msf_window, tmux_filepath
+
+    os.system(f"{tmux_filepath} send-keys -t {tmux_msf_window}.0 \"{keys}\" {'Enter' if do_press_enter else ''}")
 
 
 def metasploit_test():
     start_metasploit_tmux()
+    send_keys_to_msfconsole("whoami")
+    send_keys_to_msfconsole("search vftpd")
 
 # ======================================================================================================================
 # MAIN FUNCTION
