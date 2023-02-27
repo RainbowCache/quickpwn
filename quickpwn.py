@@ -333,10 +333,18 @@ def send_keys_to_msfconsole(keys: str, do_press_enter: bool = True):
     os.system(f"{tmux_filepath} send-keys -t {tmux_msf_window}.0 \"{keys}\" {'Enter' if do_press_enter else ''}")
 
 
+def get_console_output_of_msfconsole():
+    global tmux_session
+    # tmux capture-pane -t qpwn-msfconsole.0 -pS -
+    result = subprocess.run([tmux_filepath, 'capture-pane', "-t", f"{tmux_session}.0", "-pS", "-"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return result.stdout.decode("UTF-8")
+
+
 def metasploit_test():
     start_metasploit_tmux()
-    send_keys_to_msfconsole("whoami")
-    send_keys_to_msfconsole("search vftpd")
+    time.sleep(2)
+    print(get_console_output_of_msfconsole())
+
 
 # ======================================================================================================================
 # MAIN FUNCTION
