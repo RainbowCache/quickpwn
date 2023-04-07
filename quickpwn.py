@@ -10,13 +10,10 @@ import subprocess
 import ipaddress
 import pymetasploit3.msfrpc as msfrpc
 
-# TODO: Integrate with pymetasploit3
-# TODO: Run some hail mary attacks.
 # TODO: Also run vulners nmap script sudo nmap -sS -sV --script vulners 10.0.2.50
 # TODO: For web services, look for a few select pages like phpmyadmin, passwords, passwords.txt, etc..
 # TODO: For FTP endpoints, check for anonymous login
 # TODO: If it sees 445, run eternal blue MS17-01, etc...
-# TODO: Searchsploit output and parsing in json.
 # TODO: Make sure metasploit and tmux are installed before running.
 # Tools needed: nmap, tmux, metasploit, exploitdb
 
@@ -232,6 +229,7 @@ def get_ports_from_product(scan_result: dict, ip: str, product: str):
 
 
 def parse_scan_results(scan_result, is_full_scan=False):
+    # Generate Report.
     report = ""
     for ip in scan_result:
         scan_output_filename = f"{results_full_dir if is_full_scan else results_partial_dir}{ip}{'_full_report.txt' if is_full_scan else '_partial_report.txt'}"
